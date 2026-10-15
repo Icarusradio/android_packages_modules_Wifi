@@ -7910,6 +7910,46 @@ public class ClientModeImplTest extends WifiBaseTest {
         return eapTlsConfig;
     }
 
+    @Test
+    public void tofuCertificateCanArriveAfterAcquisitionDisconnect() throws Exception {
+        assumeTrue(SdkLevel.isAtLeastT());
+        WifiConfiguration config = setupTrustOnFirstUse(true, true, true);
+        assertEquals("DisconnectedState", getCurrentState().getName());
+        reset(mInsecureEapNetworkHandler);
+        CertificateEventInfo event = new CertificateEventInfo(FakeKeys.CA_CERT0, "1234");
+        mCmi.sendMessage(WifiMonitor.TOFU_CERTIFICATE_EVENT, config.networkId, 1, event);
+        mLooper.dispatchAll();
+        verify(mInsecureEapNetworkHandler).addPendingCertificate(config.SSID, 1, event);
+    }
+
+    @Test
+    public void tofuIgnoresQueuedCertificateAfterSessionRevocation() throws Exception {
+        assumeTrue(SdkLevel.isAtLeastT());
+        WifiConfiguration config = setupTrustOnFirstUse(true, true, true);
+        reset(mInsecureEapNetworkHandler);
+        java.util.concurrent.atomic.AtomicBoolean current =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        CertificateEventInfo event = new CertificateEventInfo(
+                FakeKeys.CA_CERT0, "1234", current::get);
+        mCmi.sendMessage(WifiMonitor.TOFU_CERTIFICATE_EVENT, config.networkId, 0, event);
+        current.set(false);
+        mLooper.dispatchAll();
+        verify(mInsecureEapNetworkHandler, never()).addPendingCertificate(
+                anyString(), anyInt(), any());
+    }
+
+    @Test
+    public void tofuIgnoresCertificateForDifferentNetwork() throws Exception {
+        assumeTrue(SdkLevel.isAtLeastT());
+        WifiConfiguration config = setupTrustOnFirstUse(true, true, true);
+        reset(mInsecureEapNetworkHandler);
+        CertificateEventInfo event = new CertificateEventInfo(FakeKeys.CA_CERT0, "1234");
+        mCmi.sendMessage(WifiMonitor.TOFU_CERTIFICATE_EVENT, config.networkId + 1, 0, event);
+        mLooper.dispatchAll();
+        verify(mInsecureEapNetworkHandler, never()).addPendingCertificate(
+                anyString(), anyInt(), any());
+    }
+
     /**
      * Verify Trust On First Use support.
      * - This network is selected by a user.

@@ -788,6 +788,9 @@
          name. It is STRONGLY RECOMMENDED to be set to false -->
     <bool translatable="false" name="config_wifiAllowInsecureEnterpriseConfigurationsForSettingsAndSUW">false</bool>
 
+    <!-- Optional device-specific certificate adapter for legacy Huawei HIDL supplicant. -->
+    <bool translatable="false" name="config_wifiHidlTofuBridgeEnabled">false</bool>
+
     <!-- Indicate the max lines for connectivity local log based on the device ram size -->
     <integer translatable="false" name="config_wifiConnectivityLocalLogMaxLinesLowRam">256</integer>
     <integer translatable="false" name="config_wifiConnectivityLocalLogMaxLinesHighRam">512</integer>

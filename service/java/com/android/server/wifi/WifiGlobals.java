@@ -66,6 +66,7 @@ public class WifiGlobals {
     private final boolean mSaveFactoryMacToConfigStoreEnabled;
     private final int mWifiLowConnectedScoreThresholdToTriggerScanForMbb;
     private final int mWifiLowConnectedScoreScanPeriodSeconds;
+    private final boolean mHidlTofuBridgeEnabled;
     // This is read from the overlay, cache it after boot up.
     private final boolean mWifiAllowInsecureEnterpriseConfiguration;
 
@@ -100,6 +101,8 @@ public class WifiGlobals {
                 R.integer.config_wifiLowConnectedScoreScanPeriodSeconds);
         mWifiAllowInsecureEnterpriseConfiguration = mContext.getResources().getBoolean(
                 R.bool.config_wifiAllowInsecureEnterpriseConfigurationsForSettingsAndSUW);
+        mHidlTofuBridgeEnabled = mContext.getResources().getBoolean(
+                R.bool.config_wifiHidlTofuBridgeEnabled);
     }
 
     /** Get the interval between RSSI polls, in milliseconds. */
@@ -260,6 +263,11 @@ public class WifiGlobals {
     /** Get whether or not insecure enterprise configuration is allowed. */
     public boolean isInsecureEnterpriseConfigurationAllowed() {
         return mWifiAllowInsecureEnterpriseConfiguration;
+    }
+
+    /** Whether this product opts into the optional legacy supplicant certificate adapter. */
+    public boolean isHidlTofuBridgeEnabled() {
+        return mHidlTofuBridgeEnabled;
     }
 
     /** Dump method for debugging */

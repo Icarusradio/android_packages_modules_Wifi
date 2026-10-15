@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+aidl_interface {
+    name: "vendor.lineage.wifi.tofu",
+    vendor_available: true,
+    srcs: ["vendor/lineage/wifi/tofu/*.aidl"],
+    stability: "vintf",
+    versions_with_info: [
+        {
+            version: "1",
+            imports: [],
+        },
+    ],
+    backend: {
+        java: {
+            sdk_version: "module_current",
+            min_sdk_version: "30",
+            apex_available: [
+                "//apex_available:platform",
+                "com.android.wifi",
+                "test_com.android.wifi",
+            ],
+        },
+        cpp: {
+            enabled: false,
+        },
+    },
+}

@@ -20,17 +20,30 @@ import android.annotation.NonNull;
 
 import java.security.cert.X509Certificate;
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 
 /**
  * Stores supplicant certificate event information
  */
 public class CertificateEventInfo {
     CertificateEventInfo(@NonNull X509Certificate cert, @NonNull String certHash) {
+        this(cert, certHash, () -> true);
+    }
+
+    CertificateEventInfo(@NonNull X509Certificate cert, @NonNull String certHash,
+            @NonNull BooleanSupplier currentConnection) {
         this.mCert = Objects.requireNonNull(cert);
         this.mCertHash = Objects.requireNonNull(certHash);
+        mCurrentConnection = Objects.requireNonNull(currentConnection);
     }
     @NonNull private final X509Certificate mCert;
     @NonNull private final String mCertHash;
+    @NonNull private final BooleanSupplier mCurrentConnection;
+
+    /** Also checked when a queued vendor event reaches ClientModeImpl after a network switch. */
+    public boolean isCurrentConnection() {
+        return mCurrentConnection.getAsBoolean();
+    }
 
     /**
      * Get the X509 certificate stored in this object

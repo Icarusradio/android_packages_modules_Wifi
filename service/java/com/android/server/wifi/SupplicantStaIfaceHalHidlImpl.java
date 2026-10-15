@@ -25,6 +25,7 @@ import static android.net.wifi.WifiManager.WIFI_FEATURE_OCE;
 import static android.net.wifi.WifiManager.WIFI_FEATURE_OWE;
 import static android.net.wifi.WifiManager.WIFI_FEATURE_PASSPOINT_TERMS_AND_CONDITIONS;
 import static android.net.wifi.WifiManager.WIFI_FEATURE_SAE_PK;
+import static android.net.wifi.WifiManager.WIFI_FEATURE_TRUST_ON_FIRST_USE;
 import static android.net.wifi.WifiManager.WIFI_FEATURE_WAPI;
 import static android.net.wifi.WifiManager.WIFI_FEATURE_WFD_R2;
 import static android.net.wifi.WifiManager.WIFI_FEATURE_WPA3_SAE;
@@ -57,6 +58,8 @@ import android.net.wifi.ScanResult;
 import android.net.wifi.SecurityParams;
 import android.net.wifi.WifiAnnotations.WifiStandard;
 import android.net.wifi.WifiConfiguration;
+import android.net.wifi.WifiEnterpriseConfig;
+import android.net.wifi.WifiManager;
 import android.os.Handler;
 import android.os.IHwBinder.DeathRecipient;
 import android.os.RemoteException;
@@ -136,6 +139,7 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
     private final Clock mClock;
     private final WifiMetrics mWifiMetrics;
     private final WifiGlobals mWifiGlobals;
+    private final HuaweiSupplicantTofuBridge mTofuBridge;
 
     private final IServiceNotification mServiceNotificationCallback =
             new IServiceNotification.Stub() {
@@ -189,6 +193,8 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
         mClock = clock;
         mWifiMetrics = wifiMetrics;
         mWifiGlobals = wifiGlobals;
+        mTofuBridge = wifiGlobals.isHidlTofuBridgeEnabled()
+                ? new HuaweiSupplicantTofuBridge(handler) : null;
 
         mServiceManagerDeathRecipient = new ServiceManagerDeathRecipient();
         mSupplicantDeathRecipient = new SupplicantDeathRecipient();
@@ -567,6 +573,7 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
      */
     public boolean teardownIface(@NonNull String ifaceName) {
         synchronized (mLock) {
+            if (mTofuBridge != null) mTofuBridge.stop(ifaceName);
             final String methodStr = "teardownIface";
             if (checkSupplicantStaIfaceAndLogFailure(ifaceName, methodStr) == null) return false;
             if (isV1_1()) {
@@ -641,6 +648,7 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
 
     private void clearState() {
         synchronized (mLock) {
+            if (mTofuBridge != null) mTofuBridge.stopAll();
             mISupplicant = null;
             mISupplicantStaIfaces.clear();
             mCurrentNetworkLocalConfigs.clear();
@@ -1011,9 +1019,31 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
      */
     public boolean connectToNetwork(@NonNull String ifaceName, @NonNull WifiConfiguration config) {
         synchronized (mLock) {
+            if (mTofuBridge != null) mTofuBridge.stop(ifaceName);
+            final boolean acquireCertificate = config.isEnterprise()
+                    && config.enterpriseConfig.isTrustOnFirstUseEnabled()
+                    && !config.enterpriseConfig.hasCaCertificate();
+            if (acquireCertificate) {
+                // The compatibility channel is asynchronous. Never give an unapproved server
+                // credentials, including an EAP-TLS client certificate, while acquiring its cert.
+                int method = config.enterpriseConfig.getEapMethod();
+                if (mTofuBridge == null
+                        || (method != WifiEnterpriseConfig.Eap.PEAP
+                        && method != WifiEnterpriseConfig.Eap.TTLS)
+                        || config.enterpriseConfig.getPhase2Method()
+                        != WifiEnterpriseConfig.Phase2.NONE
+                        || !TextUtils.isEmpty(config.enterpriseConfig.getIdentity())
+                        || !TextUtils.isEmpty(config.enterpriseConfig.getPassword())
+                        || !TextUtils.isEmpty(config.enterpriseConfig.getClientCertificateAlias())
+                        || config.enterpriseConfig.getClientPrivateKey() != null
+                        || config.enterpriseConfig.getClientCertificateChain() != null) {
+                    loge("TOFU requires a credential-free PEAP/TTLS acquisition configuration");
+                    return false;
+                }
+            }
             logd("connectToNetwork " + config.getProfileKey());
             WifiConfiguration currentConfig = getCurrentNetworkLocalConfig(ifaceName);
-            if (WifiConfigurationUtil.isSameNetwork(config, currentConfig)) {
+            if (!acquireCertificate && WifiConfigurationUtil.isSameNetwork(config, currentConfig)) {
                 String networkSelectionBSSID = config.getNetworkSelectionStatus()
                         .getNetworkSelectionBSSID();
                 String networkSelectionBSSIDCurrent =
@@ -1058,7 +1088,8 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
 
             SecurityParams params = config.getNetworkSelectionStatus()
                     .getCandidateSecurityParams();
-            if (params != null && !params.isSecurityType(WifiConfiguration.SECURITY_TYPE_PSK)) {
+            if (!acquireCertificate && params != null
+                    && !params.isSecurityType(WifiConfiguration.SECURITY_TYPE_PSK)) {
                 List<ArrayList<Byte>> pmkDataList = mPmkCacheManager.get(config.networkId);
                 if (pmkDataList != null) {
                     logi("Set PMK cache for config id " + config.networkId);
@@ -1070,7 +1101,34 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
                 }
             }
 
+            if (acquireCertificate && !mTofuBridge.start(ifaceName, networkHandle.getNetworkId(),
+                    new HuaweiSupplicantTofuBridge.Listener() {
+                        @Override
+                        public void onCertificate(int depth, CertificateEventInfo certificate) {
+                            synchronized (mLock) {
+                                if (!certificate.isCurrentConnection()) return;
+                                mWifiMonitor.broadcastCertificationEvent(ifaceName,
+                                        config.networkId, config.SSID, depth, certificate);
+                            }
+                        }
+
+                        @Override
+                        public void onFailure() {
+                            synchronized (mLock) {
+                                disconnect(ifaceName);
+                                removeAllNetworks(ifaceName);
+                                mWifiMonitor.broadcastAuthenticationFailureEvent(ifaceName,
+                                        WifiManager.ERROR_AUTH_FAILURE_EAP_FAILURE,
+                                        -1, config.SSID, null);
+                            }
+                        }
+                    })) {
+                loge("TOFU certificate monitor is unavailable");
+                removeAllNetworks(ifaceName);
+                return false;
+            }
             if (!networkHandle.select()) {
+                if (mTofuBridge != null) mTofuBridge.stop(ifaceName);
                 loge("Failed to select network configuration: " + config.getProfileKey());
                 return false;
             }
@@ -1156,6 +1214,7 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
      */
     public boolean removeAllNetworks(@NonNull String ifaceName) {
         synchronized (mLock) {
+            if (mTofuBridge != null) mTofuBridge.stop(ifaceName);
             ArrayList<Integer> networks = listNetworks(ifaceName);
             if (networks == null) {
                 Log.e(TAG, "removeAllNetworks failed, got null networks");
@@ -1791,6 +1850,7 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
      */
     public boolean disconnect(@NonNull String ifaceName) {
         synchronized (mLock) {
+            if (mTofuBridge != null) mTofuBridge.stop(ifaceName);
             final String methodStr = "disconnect";
             ISupplicantStaIface iface = checkSupplicantStaIfaceAndLogFailure(ifaceName, methodStr);
             if (iface == null) return false;
@@ -3131,7 +3191,8 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
     public long getWpaDriverFeatureSet(@NonNull String ifaceName) {
         final String methodStr = "getWpaDriverFeatureSet";
         Mutable<Integer> drvCapabilitiesMask = new Mutable<>(0);
-        long featureSet = 0;
+        long featureSet = mTofuBridge != null && mTofuBridge.isAvailable(ifaceName)
+                ? WIFI_FEATURE_TRUST_ON_FIRST_USE : 0;
 
         if (isV1_4()) {
             drvCapabilitiesMask = getWpaDriverCapabilities_1_4(ifaceName);
@@ -3139,7 +3200,7 @@ public class SupplicantStaIfaceHalHidlImpl implements ISupplicantStaIfaceHal {
             drvCapabilitiesMask = getWpaDriverCapabilities_1_3(ifaceName);
         } else {
             Log.i(TAG, "Method " + methodStr + " is not supported in existing HAL");
-            return 0;
+            return featureSet;
         }
 
         if ((drvCapabilitiesMask.value & WpaDriverCapabilitiesMask.MBO) != 0) {

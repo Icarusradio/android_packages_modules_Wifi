@@ -3835,6 +3835,26 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
      * HSM states
      *******************************************************/
 
+    private void handleTofuCertificateEvent(Message message) {
+        CertificateEventInfo eventInfo = (CertificateEventInfo) message.obj;
+        if (mTargetWifiConfiguration == null
+                || message.arg1 != mTargetWifiConfiguration.networkId
+                || !eventInfo.isCurrentConnection()) {
+            logd("Ignoring certificate from an obsolete TOFU connection");
+            return;
+        }
+        final int certificateDepth = message.arg2;
+        if (!mInsecureEapNetworkHandler.addPendingCertificate(
+                mTargetWifiConfiguration.SSID, certificateDepth, eventInfo)) {
+            Log.d(TAG, "Cannot set pending cert.");
+        }
+        if (certificateDepth == 0 && !mLeafCertSent && mInsecureEapNetworkHandler
+                .startUserApprovalIfNecessary(mIsUserSelected)) {
+            sendMessage(CMD_DISCONNECT, StaEvent.DISCONNECT_NETWORK_UNTRUSTED);
+            mLeafCertSent = true;
+        }
+    }
+
     class ConnectableState extends State {
         private boolean mIsScreenStateChangeReceiverRegistered = false;
         BroadcastReceiver mScreenStateChangeReceiver = new BroadcastReceiver() {
@@ -3920,6 +3940,13 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
                         continueEnterSetup(ipClientManager);
                     }
                     break;
+                case WifiMonitor.TOFU_CERTIFICATE_EVENT: {
+                    // A credential-free first connection can fail before the vendor bridge's
+                    // certificate stream reaches us. Accept its still-current certificate even
+                    // in DisconnectedState, but never one from an earlier acquisition session.
+                    handleTofuCertificateEvent(message);
+                    break;
+                }
                 case CMD_ENABLE_RSSI_POLL: {
                     mEnableRssiPolling = (message.arg1 == 1);
                     break;
@@ -5337,6 +5364,16 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
                 }
                 case WifiMonitor.SUP_REQUEST_IDENTITY: {
                     int netId = message.arg2;
+                    if (mTargetWifiConfiguration != null
+                            && mTargetWifiConfiguration.networkId == netId
+                            && mTargetWifiConfiguration.enterpriseConfig != null
+                            && mTargetWifiConfiguration.enterpriseConfig.isTrustOnFirstUseEnabled()
+                            && isTrustOnFirstUseSupported()) {
+                        // A first-use acquisition intentionally has no credentials. In particular,
+                        // do not cancel the asynchronous certificate adapter on this request.
+                        logd("Ignoring identity request while acquiring TOFU certificate");
+                        break;
+                    }
                     boolean identitySent = false;
                     // For SIM & AKA/AKA' EAP method Only, get identity from ICC
                     if (mTargetWifiConfiguration != null
@@ -5405,24 +5442,6 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
                         break;
                     }
                     handleStatus = NOT_HANDLED;
-                    break;
-                }
-                case WifiMonitor.TOFU_CERTIFICATE_EVENT: {
-                    if (null == mTargetWifiConfiguration) break;
-                    final int certificateDepth = message.arg2;
-                    final CertificateEventInfo eventInfo = (CertificateEventInfo) message.obj;
-                    if (!mInsecureEapNetworkHandler.addPendingCertificate(
-                            mTargetWifiConfiguration.SSID, certificateDepth, eventInfo)) {
-                        Log.d(TAG, "Cannot set pending cert.");
-                    }
-                    // Launch user approval upon receiving the server certificate and disconnect
-                    if (certificateDepth == 0 && !mLeafCertSent && mInsecureEapNetworkHandler
-                            .startUserApprovalIfNecessary(mIsUserSelected)) {
-                        // In the TOFU flow, the user approval dialog is now displayed and the
-                        // network remains disconnected and disabled until it is approved.
-                        sendMessage(CMD_DISCONNECT, StaEvent.DISCONNECT_NETWORK_UNTRUSTED);
-                        mLeafCertSent = true;
-                    }
                     break;
                 }
                 default: {
